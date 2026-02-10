@@ -61,12 +61,23 @@ def main():
             print_article(article)
             
             # Interaction
-            print("[L]ike  [D]islike  [S]kip  [Q]uit")
+            print("[L]ike  [D]islike  [S]kip  [N]ew Topic  [Q]uit")
             choice = input("Your Choice: ").upper().strip()
             
             if choice == 'Q':
                 print("Goodbye!")
                 break
+            
+            elif choice == 'N':
+                new_topic = input("Enter new topic: ").strip()
+                if new_topic:
+                    state_values["topics"].append(new_topic)
+                    # Clear buffers to force immediate exploration of the new topic
+                    state_values["search_results"] = [] 
+                    state_values["search_query"] = ""   
+                    state_values["loop_count"] = 0
+                    print(f"Added '{new_topic}'. Refreshing feed...")
+                continue
                 
             elif choice in ['L', 'D']:
                 liked = (choice == 'L')

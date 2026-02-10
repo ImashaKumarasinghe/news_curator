@@ -96,10 +96,20 @@ def search_for_content(state: CuratorState):
          print(f"DEBUG: Retrying with Refined Query (Loop {loop_cnt}): {search_query}")
     else:
         # Construct a search query from scratch
+        # Strategy: Prioritize recent additions to topics to ensure exploration
+        topics_str = ", ".join(topics) 
+        if len(topics) > 1:
+            # Emphasize the last added topic to direct the agent's focus immediately
+            recent_topic = topics[-1]
+            topics_str = f"{topics_str} (PRIORITY FOCUS: {recent_topic})"
+
         query_prompt = f"""
         Generate a search query to find diverse news articles.
-        Topics: {", ".join(topics)}
-        User Profile: {profile}
+        Topics: {topics_str}
+        User Profile (History): {profile}
+        
+        IMPORTANT: The "PRIORITY FOCUS" topic is a new user interest. You MUST include it in the query.
+        Use the User Profile for context, but do not let old habits ignore the new topic.
         
         Return ONLY the raw search query string, nothing else.
         """
