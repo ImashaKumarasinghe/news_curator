@@ -11,3 +11,6 @@ class CuratorState(TypedDict):
     feedback_history: Annotated[List[Dict], operator.add] # Stores liked/disliked articles
     current_recommendation: Dict  # The article currently being presented
     search_results: List[Dict] # Buffer of search results
+    search_query: str # The active search query
+    loop_count: int # Safety counter for agentic loops
+

@@ -9,6 +9,8 @@ from langgraph.graph import StateGraph, END
 from tavily import TavilyClient
 
 from src.state import CuratorState
+from src.grader import grade_documents
+from src.utils import parse_content
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,24 +31,6 @@ try:
     tavily_client = TavilyClient(api_key=os.environ.get("TAVILY_API_KEY"))
 except:
     tavily_client = None
-
-def parse_content(content):
-    """Refines the content output from the LLM, handling list responses."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parsed = []
-        for item in content:
-            if isinstance(item, dict) and "text" in item:
-                parsed.append(item["text"])
-            elif isinstance(item, str):
-                parsed.append(item)
-            else:
-                parsed.append(str(item))
-        return " ".join(parsed)
-    if isinstance(content, dict) and "text" in content:
-        return content["text"]
-    return str(content)
 
 # --- Node: Refine User Profile ---
 def refine_profile(state: CuratorState):
@@ -103,17 +87,25 @@ def search_for_content(state: CuratorState):
     profile = state.get("user_profile", "")
     viewed = state.get("viewed_ids", [])
     
-    # Construct a search query
-    query_prompt = f"""
-    Generate a search query to find diverse news articles.
-    Topics: {", ".join(topics)}
-    User Profile: {profile}
+    # Check for Refined Query from Agentic Loop
+    existing_query = state.get("search_query")
+    loop_cnt = state.get("loop_count", 0)
     
-    Return ONLY the raw search query string, nothing else.
-    """
-    response_msg = llm.invoke([HumanMessage(content=query_prompt)])
-    search_query = parse_content(response_msg.content)
-    print(f"DEBUG: Searching Tavily for: {search_query}")
+    if existing_query and loop_cnt > 0:
+         search_query = existing_query
+         print(f"DEBUG: Retrying with Refined Query (Loop {loop_cnt}): {search_query}")
+    else:
+        # Construct a search query from scratch
+        query_prompt = f"""
+        Generate a search query to find diverse news articles.
+        Topics: {", ".join(topics)}
+        User Profile: {profile}
+        
+        Return ONLY the raw search query string, nothing else.
+        """
+        response_msg = llm.invoke([HumanMessage(content=query_prompt)])
+        search_query = parse_content(response_msg.content)
+        print(f"DEBUG: Searching Tavily for: {search_query}")
     
     if tavily_client:
         response = tavily_client.search(query=search_query, search_depth="advanced", max_results=5)
@@ -127,6 +119,60 @@ def search_for_content(state: CuratorState):
     
     # Add to existing buffer
     return {"search_results": current_results + filtered_results}
+
+# --- Node: Grader (Performance Model) ---
+def run_grader(state: CuratorState):
+    """
+    Evaluates the quality of the search results.
+    """
+    print("DEBUG: Grading documents...")
+    grade = grade_documents(state, llm)
+    return grade
+
+# --- Node: Refine Query (Agentic Correction) ---
+def refine_query_node(state: CuratorState):
+    """
+    Generates a generic or improved query if the grading was poor.
+    """
+    topics = state.get("topics", [])
+    current_query = state.get("search_query", "")
+    loop_cnt = state.get("loop_count", 0)
+    
+    print("DEBUG: Refining search query...")
+    
+    # Simple strategy: Broaden the search
+    refine_prompt = f"""
+    The previous search for {", ".join(topics)} yielded poor results.
+    Previous Query: {current_query}
+    
+    Generate a NEW, DIFFERENT, BETTER search query. 
+    Make it broader or use different keywords.
+    Return ONLY the raw query string.
+    """
+    
+    response = llm.invoke([HumanMessage(content=refine_prompt)])
+    new_query = parse_content(response.content)
+    
+    return {
+        "search_query": new_query,
+        "loop_count": loop_cnt + 1,
+        "search_results": [] # Clear bad results to force new search
+    }
+
+def should_continue(state: CuratorState) -> Literal["refine_query", "curate"]:
+    """
+    Decides whether to retry search or proceed to curation.
+    """
+    score = state.get("relevance_score", 0)
+    loop_cnt = state.get("loop_count", 0)
+    results = state.get("search_results", [])
+    
+    # Thresholds: If we have at least 1 relevant doc, or we looped too much
+    if len(results) >= 1 or loop_cnt >= 2:
+        return "curate"
+    
+    # Otherwise retry
+    return "refine_query"
 
 # --- Node: Curate ---
 def select_article(state: CuratorState):
@@ -180,13 +226,26 @@ workflow = StateGraph(CuratorState)
 
 workflow.add_node("refine_profile", refine_profile)
 workflow.add_node("search", search_for_content)
+workflow.add_node("grade", run_grader)
+workflow.add_node("refine_query", refine_query_node)
 workflow.add_node("curate", select_article)
 
 # Flow
-# Start -> Refine (Update model based on previous input) -> Search (If needed) -> Curate -> End
 workflow.set_entry_point("refine_profile")
 workflow.add_edge("refine_profile", "search")
-workflow.add_edge("search", "curate")
+workflow.add_edge("search", "grade")
+
+# Conditional Edge from Grader
+workflow.add_conditional_edges(
+    "grade",
+    should_continue,
+    {
+        "refine_query": "refine_query",
+        "curate": "curate"
+    }
+)
+
+workflow.add_edge("refine_query", "search")
 workflow.add_edge("curate", END)
 
 app = workflow.compile()
